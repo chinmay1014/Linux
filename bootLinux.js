@@ -73,12 +73,17 @@ const bootLinux = (() => {
     return {
         getStatus: () => state,
         exec: (cmd, cb) => {
-            if (!state.ready) { cb('not ready'); return; }
-            if (typeof Module === 'undefined') { cb('no module'); return; }
-            if (typeof Module.callMain === 'function') {
+            if (!state.ready) return cb('not ready');
+            if (typeof Module === 'undefined') return cb('no module');
+            if (typeof Module.callMain !== 'function') return cb('callMain missing');
+            
+            try {
                 Module.callMain(['-c', cmd]);
+                cb(null);
+            } catch (err) {
+                cb(err);
             }
-            cb(null);
         }
     };
 })();
+        
