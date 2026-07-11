@@ -1,28 +1,53 @@
 const bootLinux = (() => {
+    let isRuntimeReady = false;
+    let runtimeResolve = null;
+
     const state = { ready: false, error: null, phase: 'init' };
     const baseUrl = 'https://raw.githubusercontent.com/chinmay1014/Linux/master';
     
     const log = (msg) => console.log('[bootLinux] ' + msg);
-    
     const fetchFile = (url) => fetch(url).then(r => r.ok ? r.text() : Promise.reject(`HTTP ${r.status}`));
     
     const injectScript = (code) => {
-        const s = document.createElement('script');
-        s.textContent = code;
-        document.head.appendChild(s);
+        try {
+            const s = document.createElement('script');
+            s.textContent = code;
+            document.head.appendChild(s);
+            document.head.removeChild(s);
+        } catch (err) {
+            return Promise.reject(err);
+        }
+        return Promise.resolve();
     };
     
     const injectHTML = (html) => {
-        document.body.innerHTML = html;
+        const container = document.createElement('div');
+        container.id = 'linux-boot-container';
+        container.innerHTML = html;
+        document.body.appendChild(container);
     };
-    
-    const checkModule = (callback) => {
-        if (typeof Module !== 'undefined' && Module.asm) {
-            log('Module ready');
-            callback();
-        } else {
-            setTimeout(() => checkModule(callback), 100);
-        }
+
+    const setupEmscriptenHook = () => {
+        window.Module = window.Module || {};
+        const existingHook = window.Module.onRuntimeInitialized;
+        window.Module.onRuntimeInitialized = () => {
+            if (typeof existingHook === 'function') existingHook();
+            isRuntimeReady = true;
+            if (runtimeResolve) runtimeResolve();
+        };
+    };
+
+    const waitForRuntime = () => {
+        return new Promise((resolve, reject) => {
+            if (isRuntimeReady) return resolve();
+            runtimeResolve = resolve;
+
+            setTimeout(() => {
+                if (!isRuntimeReady) {
+                    reject(new Error('OS boot timed out (Wasm failed to initialize)'));
+                }
+            }, 10000);
+        });
     };
     
     const loadHTML = () => fetchFile(baseUrl + '/boot.html').then(html => {
@@ -30,28 +55,27 @@ const bootLinux = (() => {
         log('HTML loaded');
     });
     
-    const loadPthread = () => fetchFile(baseUrl + '/pthread-main.js').then(code => {
-        injectScript(code);
-        log('pthread loaded');
-    }).catch(() => log('pthread skipped'));
-    
     const loadBoot = () => fetchFile(baseUrl + '/boot.min.js').then(code => {
-        injectScript(code);
-        log('boot loaded');
+        return injectScript(code).then(() => log('boot loaded'));
     });
     
     const loadLKL = () => fetchFile(baseUrl + '/liblkl.min.js').then(code => {
-        injectScript(code);
-        log('lkl loaded');
+        return injectScript(code).then(() => log('lkl loaded'));
     });
     
     const init = () => {
         log('starting');
         loadHTML()
-            .then(() => loadPthread())
-            .then(() => loadBoot())
-            .then(() => loadLKL())
-            .then(() => new Promise(resolve => checkModule(resolve)))
+            .then(() => {
+                setupEmscriptenHook(); 
+                return loadBoot();
+            })
+            .then(() => {
+                return Promise.all([
+                    loadLKL(),
+                    waitForRuntime()
+                ]);
+            })
             .then(() => {
                 state.ready = true;
                 state.phase = 'ready';
@@ -74,16 +98,18 @@ const bootLinux = (() => {
         getStatus: () => state,
         exec: (cmd, cb) => {
             if (!state.ready) return cb('not ready');
-            if (typeof Module === 'undefined') return cb('no module');
-            if (typeof Module.callMain !== 'function') return cb('callMain missing');
             
             try {
-                Module.callMain(['-c', cmd]);
-                cb(null);
+                if (typeof Module.callMain === 'function') {
+                    Module.callMain(['-c', cmd]);
+                    cb(null);
+                } else {
+                    cb('callMain missing or already executed');
+                }
             } catch (err) {
                 cb(err);
             }
         }
     };
 })();
-        
+                   
